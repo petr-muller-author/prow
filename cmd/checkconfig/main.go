@@ -670,6 +670,14 @@ func validateTideRequirements(cfg *config.Config, pcfg *plugins.Configuration, i
 		// matcher determines if the tide query appropriately honors the
 		// label in question -- whether by requiring it or forbidding it
 		matcher matcher
+		// skipNotRequired skips the check that flags orgs/repos that enable
+		// the plugin but do not have tide honor the label. This is used for
+		// needs-rebase, where enabling the plugin without forbidding the
+		// label in tide is not a misconfiguration: tide already refuses to
+		// merge any PR with a merge conflict regardless of the query (see
+		// mergeChecker.isAllowedToMerge in pkg/tide/github.go), so requiring
+		// the label to be forbidden in the query would be redundant.
+		skipNotRequired bool
 		// config holds the orgs and repos for which tide does honor the
 		// label; this container is populated conditionally from queries
 		// using the matcher
@@ -690,7 +698,7 @@ func validateTideRequirements(cfg *config.Config, pcfg *plugins.Configuration, i
 			plugin{name: releasenote.PluginName, label: labels.ReleaseNoteLabelNeeded, matcher: forbids},
 			plugin{name: cherrypickunapproved.PluginName, label: labels.CpUnapproved, matcher: forbids},
 			plugin{name: blockade.PluginName, label: labels.BlockedPaths, matcher: forbids},
-			plugin{name: needsrebase.PluginName, label: labels.NeedsRebase, external: true, matcher: forbids},
+			plugin{name: needsrebase.PluginName, label: labels.NeedsRebase, external: true, matcher: forbids, skipNotRequired: true},
 		)
 	}
 
@@ -718,6 +726,7 @@ func validateTideRequirements(cfg *config.Config, pcfg *plugins.Configuration, i
 			pluginConfig.config,
 			overallTideConfig,
 			enabledOrgReposForPlugin(pcfg, pluginConfig.name, pluginConfig.external),
+			pluginConfig.skipNotRequired,
 		)
 		validationErrs = append(validationErrs, err)
 	}
@@ -901,16 +910,18 @@ func enabledOrgReposForPlugin(c *plugins.Configuration, plugin string, external 
 //   - if org/repo is configured in tide, the tide configuration must require the same set of
 //     plugins as are configured. If the repository has LGTM and approve enabled, the tide query
 //     must require both labels
-func ensureValidConfiguration(plugin, label, verb string, tideSubSet, tideSuperSet, pluginsSubSet *orgRepoConfig) error {
+func ensureValidConfiguration(plugin, label, verb string, tideSubSet, tideSuperSet, pluginsSubSet *orgRepoConfig, skipNotRequired bool) error {
 	notEnabled := tideSubSet.difference(pluginsSubSet).items()
-	notRequired := pluginsSubSet.intersection(tideSuperSet).difference(tideSubSet).items()
 
 	var configErrors []error
 	if len(notEnabled) > 0 {
 		configErrors = append(configErrors, fmt.Errorf("the following orgs or repos %s the %s label for merging but do not enable the %s plugin: %v", verb, label, plugin, notEnabled))
 	}
-	if len(notRequired) > 0 {
-		configErrors = append(configErrors, fmt.Errorf("the following orgs or repos enable the %s plugin but do not %s the %s label for merging: %v", plugin, verb, label, notRequired))
+	if !skipNotRequired {
+		notRequired := pluginsSubSet.intersection(tideSuperSet).difference(tideSubSet).items()
+		if len(notRequired) > 0 {
+			configErrors = append(configErrors, fmt.Errorf("the following orgs or repos enable the %s plugin but do not %s the %s label for merging: %v", plugin, verb, label, notRequired))
+		}
 	}
 
 	return utilerrors.NewAggregate(configErrors)

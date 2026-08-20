@@ -50,6 +50,7 @@ func TestEnsureValidConfiguration(t *testing.T) {
 	var testCases = []struct {
 		name                                    string
 		tideSubSet, tideSuperSet, pluginsSubSet *orgRepoConfig
+		skipNotRequired                         bool
 		expectedErr                             bool
 	}{
 		{
@@ -164,11 +165,19 @@ func TestEnsureValidConfiguration(t *testing.T) {
 			pluginsSubSet: newOrgRepoConfig(map[string]sets.Set[string]{"org": nil}, nil),
 			expectedErr:   true,
 		},
+		{
+			name:            "skipNotRequired suppresses the plugin-enabled-without-requirement error",
+			tideSubSet:      newOrgRepoConfig(nil, nil),
+			tideSuperSet:    newOrgRepoConfig(map[string]sets.Set[string]{"org": nil}, nil),
+			pluginsSubSet:   newOrgRepoConfig(map[string]sets.Set[string]{"org": nil}, nil),
+			skipNotRequired: true,
+			expectedErr:     false,
+		},
 	}
 
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := ensureValidConfiguration("plugin", "label", "verb", testCase.tideSubSet, testCase.tideSuperSet, testCase.pluginsSubSet)
+			err := ensureValidConfiguration("plugin", "label", "verb", testCase.tideSubSet, testCase.tideSuperSet, testCase.pluginsSubSet, testCase.skipNotRequired)
 			if testCase.expectedErr && err == nil {
 				t.Errorf("%s: expected an error but got none", testCase.name)
 			}
