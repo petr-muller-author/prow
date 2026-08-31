@@ -63,12 +63,12 @@ func newDefaultFakeSinkerConfig() config.Sinker {
 }
 
 type fca struct {
-	c *config.Config
+	c *config.PayloadlessConfig
 }
 
 func newFakeConfigAgent(s config.Sinker) *fca {
 	return &fca{
-		c: &config.Config{
+		c: config.PayloadlessFromConfig(&config.Config{
 			ProwConfig: config.ProwConfig{
 				ProwJobNamespace: "ns",
 				PodNamespace:     "ns",
@@ -79,12 +79,12 @@ func newFakeConfigAgent(s config.Sinker) *fca {
 					{JobBase: config.JobBase{Name: "retester"}},
 				},
 			},
-		},
+		}),
 	}
 
 }
 
-func (f *fca) Config() *config.Config {
+func (f *fca) Config() *config.PayloadlessConfig {
 	return f.c
 }
 

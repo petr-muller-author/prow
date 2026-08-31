@@ -339,43 +339,54 @@ func lastConfigModTime(prowConfig, jobConfig string) (time.Time, error) {
 // fails, Start will return the error and abort. Future load failures will log
 // the failure message but continue attempting to load.
 func (ca *Agent) Start(prowConfig, jobConfig string, additionalProwConfigDirs []string, supplementalProwConfigsFileNameSuffix string, additionals ...func(*Config) error) error {
-	lastModTime, err := lastConfigModTime(prowConfig, jobConfig)
-	if err != nil {
-		lastModTime = time.Time{}
-	}
 	c, err := Load(prowConfig, jobConfig, additionalProwConfigDirs, supplementalProwConfigsFileNameSuffix, additionals...)
 	if err != nil {
 		return err
 	}
 	ca.Set(c)
-	go func() {
-		// Rarely, if two changes happen in the same second, mtime will
-		// be the same for the second change, and an mtime-based check would
-		// fail. Reload periodically just in case.
-		skips := 0
-		for range time.Tick(1 * time.Second) {
-			if skips < 600 {
-				recentModTime, err := lastConfigModTime(prowConfig, jobConfig)
-				if err != nil {
-					continue
-				}
-				if !recentModTime.After(lastModTime) {
-					skips++
-					continue // file hasn't been modified
-				}
-				lastModTime = recentModTime
-			}
-			if c, err := Load(prowConfig, jobConfig, additionalProwConfigDirs, supplementalProwConfigsFileNameSuffix, additionals...); err != nil {
-				logrus.WithField("prowConfig", prowConfig).
-					WithField("jobConfig", jobConfig).
-					WithError(err).Error("Error loading config.")
-			} else {
-				skips = 0
-				ca.Set(c)
-			}
+	go pollConfig(prowConfig, jobConfig, func() error {
+		c, err := Load(prowConfig, jobConfig, additionalProwConfigDirs, supplementalProwConfigsFileNameSuffix, additionals...)
+		if err != nil {
+			return err
 		}
-	}()
+		ca.Set(c)
+		return nil
+	})
 	return nil
+}
+
+// pollConfig watches the config files for modifications and calls reload when
+// they change. It is shared by Agent and PayloadlessAgent, which differ only in
+// what they load and where they store it.
+func pollConfig(prowConfig, jobConfig string, reload func() error) {
+	lastModTime, err := lastConfigModTime(prowConfig, jobConfig)
+	if err != nil {
+		lastModTime = time.Time{}
+	}
+	// Rarely, if two changes happen in the same second, mtime will
+	// be the same for the second change, and an mtime-based check would
+	// fail. Reload periodically just in case.
+	skips := 0
+	for range time.Tick(1 * time.Second) {
+		if skips < 600 {
+			recentModTime, err := lastConfigModTime(prowConfig, jobConfig)
+			if err != nil {
+				continue
+			}
+			if !recentModTime.After(lastModTime) {
+				skips++
+				continue // file hasn't been modified
+			}
+			lastModTime = recentModTime
+		}
+		if err := reload(); err != nil {
+			logrus.WithField("prowConfig", prowConfig).
+				WithField("jobConfig", jobConfig).
+				WithError(err).Error("Error loading config.")
+		} else {
+			skips = 0
+		}
+	}
 }
 
 // Subscribe registers the channel for messages on config reload.

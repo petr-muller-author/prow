@@ -111,7 +111,11 @@ func main() {
 
 	pprof.Instrument(o.instrumentationOptions)
 
-	configAgent, err := o.config.ConfigAgent()
+	// Sinker never builds a pod: it only needs the prow config and the names of
+	// the configured jobs. Loading the config without the job pod specs keeps
+	// them out of memory entirely, and the payloadless config it gets back
+	// cannot be used to reach a pod spec by accident.
+	configAgent, err := o.config.PayloadlessConfigAgent()
 	if err != nil {
 		logrus.WithError(err).Fatal("Error starting config agent.")
 	}
@@ -222,7 +226,7 @@ type controller struct {
 	logger        *logrus.Entry
 	prowJobClient ctrlruntimeclient.Client
 	podClients    map[string]ctrlruntimeclient.Client
-	config        config.Getter
+	config        config.PayloadlessGetter
 	runOnce       bool
 }
 

@@ -94,3 +94,19 @@ func (o *ConfigOptions) ConfigAgent(reuse ...*config.Agent) (*config.Agent, erro
 func (o *ConfigOptions) ConfigAgentWithAdditionals(ca *config.Agent, additionals []func(*config.Config) error) (*config.Agent, error) {
 	return ca, ca.Start(o.ConfigPath, o.JobConfigPath, o.SupplementalProwConfigDirs.Strings(), o.SupplementalProwConfigsFileNameSuffix, additionals...)
 }
+
+// PayloadlessConfigAgent returns a config agent that loads the config without
+// the job pod specs. Use it in components that never need to look at a pod
+// spec: it keeps the pod specs out of memory, and the config it hands out
+// cannot be used to reach them.
+func (o *ConfigOptions) PayloadlessConfigAgent(reuse ...*config.PayloadlessAgent) (*config.PayloadlessAgent, error) {
+	var ca *config.PayloadlessAgent
+	if n := len(reuse); n > 1 {
+		return nil, fmt.Errorf("got more than one (%d) config agents to re-use", n)
+	} else if n == 1 {
+		ca = reuse[0]
+	} else {
+		ca = &config.PayloadlessAgent{}
+	}
+	return ca, ca.Start(o.ConfigPath, o.JobConfigPath, o.SupplementalProwConfigDirs.Strings(), o.SupplementalProwConfigsFileNameSuffix)
+}

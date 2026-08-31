@@ -141,6 +141,12 @@ type JobConfig struct {
 	// ProwIgnored is a well known, unparsed field where non-Prow fields can
 	// be defined without conflicting with unknown field validation.
 	ProwIgnored *json.RawMessage `json:"prow_ignored,omitempty"`
+
+	// PodSpecsOmitted records that this job config was loaded by the
+	// payloadless loader, which does not read job pod specs from disk. It
+	// suppresses the validation that concerns pod specs, and gates handing the
+	// config out as a PayloadlessConfig. See payloadless.go.
+	PodSpecsOmitted bool `json:"-"`
 }
 
 // ProwConfig is config for all prow controllers.
@@ -1674,7 +1680,7 @@ func loadWithYamlOpts(yamlOpts []yaml.JSONOpt, prowConfig, jobConfig string, sup
 			c, err = nil, fmt.Errorf("panic loading config: %v\n%s", r, string(debug.Stack()))
 		}
 	}()
-	c, err = loadConfig(prowConfig, jobConfig, supplementalProwConfigDirs, supplementalProwConfigsFileNameSuffix, yamlOpts...)
+	c, err = loadConfig(prowConfig, jobConfig, supplementalProwConfigDirs, supplementalProwConfigsFileNameSuffix, false, yamlOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1698,6 +1704,28 @@ func loadWithYamlOpts(yamlOpts []yaml.JSONOpt, prowConfig, jobConfig string, sup
 
 // ReadJobConfig reads the JobConfig yaml, but does not expand or validate it.
 func ReadJobConfig(jobConfig string, yamlOpts ...yaml.JSONOpt) (JobConfig, error) {
+	return readJobConfig(jobConfig, false, yamlOpts...)
+}
+
+// readJobConfigFile reads a single job config file. When payloadless is set,
+// the job pod specs in it are discarded while being decoded, instead of being
+// allocated and dropped afterwards.
+func readJobConfigFile(path string, payloadless bool, yamlOpts ...yaml.JSONOpt) (JobConfig, error) {
+	if !payloadless {
+		var jc JobConfig
+		if err := yamlToConfig(path, &jc, yamlOpts...); err != nil {
+			return JobConfig{}, err
+		}
+		return jc, nil
+	}
+	var pjc payloadlessJobConfig
+	if err := yamlToConfig(path, &pjc, yamlOpts...); err != nil {
+		return JobConfig{}, err
+	}
+	return pjc.jobConfig(), nil
+}
+
+func readJobConfig(jobConfig string, payloadless bool, yamlOpts ...yaml.JSONOpt) (JobConfig, error) {
 	stat, err := os.Stat(jobConfig)
 	if err != nil {
 		return JobConfig{}, err
@@ -1705,11 +1733,7 @@ func ReadJobConfig(jobConfig string, yamlOpts ...yaml.JSONOpt) (JobConfig, error
 
 	if !stat.IsDir() {
 		// still support a single file.
-		var jc JobConfig
-		if err := yamlToConfig(jobConfig, &jc, yamlOpts...); err != nil {
-			return JobConfig{}, err
-		}
-		return jc, nil
+		return readJobConfigFile(jobConfig, payloadless, yamlOpts...)
 	}
 
 	prowIgnore, err := gitignore.NewRepositoryWithFile(jobConfig, ProwIgnoreFileName)
@@ -1722,7 +1746,7 @@ func ReadJobConfig(jobConfig string, yamlOpts ...yaml.JSONOpt) (JobConfig, error
 
 	jobConfigCount := 0
 	allStart := time.Now()
-	jc := JobConfig{}
+	jc := JobConfig{PodSpecsOmitted: payloadless}
 	var errs []error
 	err = filepath.Walk(jobConfig, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1760,8 +1784,8 @@ func ReadJobConfig(jobConfig string, yamlOpts ...yaml.JSONOpt) (JobConfig, error
 		uniqueBasenames.Insert(base)
 
 		fileStart := time.Now()
-		var subConfig JobConfig
-		if err := yamlToConfig(path, &subConfig, yamlOpts...); err != nil {
+		subConfig, err := readJobConfigFile(path, payloadless, yamlOpts...)
+		if err != nil {
 			errs = append(errs, err)
 			return nil
 		}
@@ -1784,7 +1808,7 @@ func ReadJobConfig(jobConfig string, yamlOpts ...yaml.JSONOpt) (JobConfig, error
 }
 
 // loadConfig loads one or multiple config files and returns a config object.
-func loadConfig(prowConfig, jobConfig string, additionalProwConfigDirs []string, supplementalProwConfigsFileNameSuffix string, yamlOpts ...yaml.JSONOpt) (*Config, error) {
+func loadConfig(prowConfig, jobConfig string, additionalProwConfigDirs []string, supplementalProwConfigsFileNameSuffix string, payloadless bool, yamlOpts ...yaml.JSONOpt) (*Config, error) {
 	stat, err := os.Stat(prowConfig)
 	if err != nil {
 		return nil, err
@@ -1795,7 +1819,15 @@ func loadConfig(prowConfig, jobConfig string, additionalProwConfigDirs []string,
 	}
 
 	var nc Config
-	if err := yamlToConfig(prowConfig, &nc, yamlOpts...); err != nil {
+	if payloadless {
+		// The prow config file may carry job config of its own, so it is read
+		// through the mirror types as well.
+		var plc payloadlessConfig
+		if err := yamlToConfig(prowConfig, &plc, yamlOpts...); err != nil {
+			return nil, err
+		}
+		nc = Config{JobConfig: plc.payloadlessJobConfig.jobConfig(), ProwConfig: plc.ProwConfig}
+	} else if err := yamlToConfig(prowConfig, &nc, yamlOpts...); err != nil {
 		return nil, err
 	}
 
@@ -1912,7 +1944,7 @@ func loadConfig(prowConfig, jobConfig string, additionalProwConfigDirs []string,
 		return &nc, nil
 	}
 
-	jc, err := ReadJobConfig(jobConfig, yamlOpts...)
+	jc, err := readJobConfig(jobConfig, payloadless, yamlOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1938,6 +1970,12 @@ func yamlToConfig(path string, nc any, opts ...yaml.JSONOpt) error {
 		jc = v
 	case *Config:
 		jc = &v.JobConfig
+	case *payloadlessJobConfig:
+		v.setSourcePath(path)
+		return nil
+	case *payloadlessConfig:
+		v.setSourcePath(path)
+		return nil
 	default:
 		// No job config, skip inserting filepaths into the jobs.
 		return nil
@@ -1995,6 +2033,7 @@ func (c *Config) mergeJobConfig(jc JobConfig) error {
 		PresubmitsStatic:  c.PresubmitsStatic,
 		Periodics:         c.Periodics,
 		PostsubmitsStatic: c.PostsubmitsStatic,
+		PodSpecsOmitted:   c.PodSpecsOmitted,
 	}, jc)
 	if err != nil {
 		return err
@@ -2003,6 +2042,7 @@ func (c *Config) mergeJobConfig(jc JobConfig) error {
 	c.PresubmitsStatic = m.PresubmitsStatic
 	c.Periodics = m.Periodics
 	c.PostsubmitsStatic = m.PostsubmitsStatic
+	c.PodSpecsOmitted = m.PodSpecsOmitted
 	return nil
 }
 
@@ -2015,7 +2055,7 @@ func (c *Config) mergeJobConfig(jc JobConfig) error {
 func mergeJobConfigs(a, b JobConfig) (JobConfig, error) {
 	// Merge everything.
 	// *** Presets ***
-	c := JobConfig{}
+	c := JobConfig{PodSpecsOmitted: a.PodSpecsOmitted || b.PodSpecsOmitted}
 	c.Presets = append(a.Presets, b.Presets...)
 
 	// validate no duplicated preset key-value pairs.
@@ -2258,11 +2298,17 @@ func (c Config) validateJobBase(v JobBase, jobType prowapi.ProwJobType) error {
 	if v.MaxConcurrency < 0 {
 		return fmt.Errorf("max_concurrency: %d must be a non-negative number", v.MaxConcurrency)
 	}
-	if err := validateAgent(v, c.PodNamespace); err != nil {
-		return err
-	}
-	if err := validatePodSpec(jobType, v.Spec, v.DecorationConfig); err != nil {
-		return err
+	// When the pod specs were not loaded, the checks that concern them cannot
+	// run: the absent spec is not a misconfiguration. Components loading a
+	// payloadless config are not the ones building pods; the pod specs are
+	// validated by the components that do load them, and by checkconfig.
+	if !c.PodSpecsOmitted {
+		if err := validateAgent(v, c.PodNamespace); err != nil {
+			return err
+		}
+		if err := validatePodSpec(jobType, v.Spec, v.DecorationConfig); err != nil {
+			return err
+		}
 	}
 	if v.Agent == prowapi.TektonAgent {
 		pipelineRunSpec, err := v.GetPipelineRunSpec()
