@@ -823,12 +823,24 @@ func (d *DefaultRerunAuthConfigEntry) matches(repo, cluster string) bool {
 // mergeProwJobDefault finds all matching ProwJobDefaultEntry
 // for a job and merges them sequentially before merging into the job's own
 // PrwoJobDefault. Configs merged later override values from earlier configs.
-func (pc *ProwConfig) mergeProwJobDefault(repo, cluster string, jobDefault *prowapi.ProwJobDefault) *prowapi.ProwJobDefault {
-	var merged *prowapi.ProwJobDefault
-	for _, entry := range pc.ProwJobDefaultEntries {
-		if entry.matches(repo, cluster) {
-			merged = entry.Config.ApplyDefault(merged)
+//
+// When the job has no ProwJobDefault of its own, the result depends only on
+// which entries matched, so an optional cache lets all such jobs share one
+// value instead of getting an identical copy each. See jobDefaultsCache.
+func (pc *ProwConfig) mergeProwJobDefault(repo, cluster string, jobDefault *prowapi.ProwJobDefault, cache *jobDefaultsCache) *prowapi.ProwJobDefault {
+	matching, key := matchingEntries(len(pc.ProwJobDefaultEntries), func(i int) bool {
+		return pc.ProwJobDefaultEntries[i].matches(repo, cluster)
+	})
+	cacheable := jobDefault == nil && cache != nil
+	if cacheable {
+		if cached, ok := cache.prowJobDefaults[key]; ok {
+			return cached
 		}
+	}
+
+	var merged *prowapi.ProwJobDefault
+	for _, i := range matching {
+		merged = pc.ProwJobDefaultEntries[i].Config.ApplyDefault(merged)
 	}
 	merged = jobDefault.ApplyDefault(merged)
 	if merged == nil {
@@ -837,22 +849,74 @@ func (pc *ProwConfig) mergeProwJobDefault(repo, cluster string, jobDefault *prow
 	if merged.TenantID == "" {
 		merged.TenantID = DefaultTenantID
 	}
+	if cacheable {
+		cache.prowJobDefaults[key] = merged
+	}
 	return merged
+}
+
+// jobDefaultsCache lets jobs that end up with the same defaulted
+// DecorationConfig or ProwJobDefault share one value.
+//
+// Defaulting used to hand every job its own deep copy, which for a large job
+// config means thousands of identical structures: the merged result is a
+// function of the entries that matched the job's repo and cluster, and most
+// jobs do not override anything themselves. The cache is only used while
+// loading, from a single goroutine, and is not retained on the config
+// afterwards - so a config that is being served concurrently is never written
+// to. Jobs that do carry their own DecorationConfig or ProwJobDefault are not
+// shared, since their merged result is specific to them.
+type jobDefaultsCache struct {
+	decorationConfigs map[string]*prowapi.DecorationConfig
+	prowJobDefaults   map[string]*prowapi.ProwJobDefault
+}
+
+func newJobDefaultsCache() *jobDefaultsCache {
+	return &jobDefaultsCache{
+		decorationConfigs: map[string]*prowapi.DecorationConfig{},
+		prowJobDefaults:   map[string]*prowapi.ProwJobDefault{},
+	}
+}
+
+// matchingEntries returns the indices of the entries that match, and a cache
+// key identifying exactly that set of entries. Two jobs with the same key get
+// the same merged result, whatever their repo and cluster were.
+func matchingEntries(count int, matches func(int) bool) ([]int, string) {
+	var indices []int
+	var key strings.Builder
+	for i := 0; i < count; i++ {
+		if matches(i) {
+			indices = append(indices, i)
+			fmt.Fprintf(&key, "%d,", i)
+		}
+	}
+	return indices, key.String()
 }
 
 // mergeDefaultDecorationConfig finds all matching DefaultDecorationConfigEntry
 // for a job and merges them sequentially before merging into the job's own
 // DecorationConfig. Configs merged later override values from earlier configs.
-func (p *Plank) mergeDefaultDecorationConfig(repo, cluster string, jobDC *prowapi.DecorationConfig) *prowapi.DecorationConfig {
-	var merged *prowapi.DecorationConfig
-	for _, entry := range p.DefaultDecorationConfigs {
-		if entry.matches(repo, cluster) {
-			merged = entry.Config.ApplyDefault(merged)
+func (p *Plank) mergeDefaultDecorationConfig(repo, cluster string, jobDC *prowapi.DecorationConfig, cache *jobDefaultsCache) *prowapi.DecorationConfig {
+	matching, key := matchingEntries(len(p.DefaultDecorationConfigs), func(i int) bool {
+		return p.DefaultDecorationConfigs[i].matches(repo, cluster)
+	})
+	cacheable := jobDC == nil && cache != nil
+	if cacheable {
+		if cached, ok := cache.decorationConfigs[key]; ok {
+			return cached
 		}
+	}
+
+	var merged *prowapi.DecorationConfig
+	for _, i := range matching {
+		merged = p.DefaultDecorationConfigs[i].Config.ApplyDefault(merged)
 	}
 	merged = jobDC.ApplyDefault(merged)
 	if merged == nil {
 		merged = &prowapi.DecorationConfig{}
+	}
+	if cacheable {
+		cache.decorationConfigs[key] = merged
 	}
 	return merged
 }
@@ -860,21 +924,21 @@ func (p *Plank) mergeDefaultDecorationConfig(repo, cluster string, jobDC *prowap
 // GetProwJobDefault finds the resolved prowJobDefault config for a given repo and
 // cluster.
 func (c *Config) GetProwJobDefault(repo, cluster string) *prowapi.ProwJobDefault {
-	return c.mergeProwJobDefault(repo, cluster, nil)
+	return c.mergeProwJobDefault(repo, cluster, nil, nil)
 }
 
 // GuessDefaultDecorationConfig attempts to find the resolved default decoration
 // config for a given repo and cluster. It is primarily used for best effort
 // guesses about GCS configuration for undecorated jobs.
 func (p *Plank) GuessDefaultDecorationConfig(repo, cluster string) *prowapi.DecorationConfig {
-	return p.mergeDefaultDecorationConfig(repo, cluster, nil)
+	return p.mergeDefaultDecorationConfig(repo, cluster, nil, nil)
 }
 
 // GuessDefaultDecorationConfig attempts to find the resolved default decoration
 // config for a given repo, cluster and job DecorationConfig. It is primarily used for best effort
 // guesses about GCS configuration for undecorated jobs.
 func (p *Plank) GuessDefaultDecorationConfigWithJobDC(repo, cluster string, jobDC *prowapi.DecorationConfig) *prowapi.DecorationConfig {
-	return p.mergeDefaultDecorationConfig(repo, cluster, jobDC)
+	return p.mergeDefaultDecorationConfig(repo, cluster, jobDC, nil)
 }
 
 // defaultDecorationMapToSlice converts the old format
@@ -2099,53 +2163,53 @@ func shouldDecorate(c *JobConfig, util *UtilityConfig) bool {
 	return c.DecorateAllJobs
 }
 
-func setPresubmitProwJobDefaults(c *Config, ps *Presubmit, repo string) {
-	ps.ProwJobDefault = c.mergeProwJobDefault(repo, ps.Cluster, ps.ProwJobDefault)
+func setPresubmitProwJobDefaults(c *Config, ps *Presubmit, repo string, cache *jobDefaultsCache) {
+	ps.ProwJobDefault = c.mergeProwJobDefault(repo, ps.Cluster, ps.ProwJobDefault, cache)
 }
 
-func setPostsubmitProwJobDefaults(c *Config, ps *Postsubmit, repo string) {
-	ps.ProwJobDefault = c.mergeProwJobDefault(repo, ps.Cluster, ps.ProwJobDefault)
+func setPostsubmitProwJobDefaults(c *Config, ps *Postsubmit, repo string, cache *jobDefaultsCache) {
+	ps.ProwJobDefault = c.mergeProwJobDefault(repo, ps.Cluster, ps.ProwJobDefault, cache)
 }
 
-func setPeriodicProwJobDefaults(c *Config, ps *Periodic) {
+func setPeriodicProwJobDefaults(c *Config, ps *Periodic, cache *jobDefaultsCache) {
 	var repo string
 	if len(ps.UtilityConfig.ExtraRefs) > 0 {
 		repo = fmt.Sprintf("%s/%s", ps.UtilityConfig.ExtraRefs[0].Org, ps.UtilityConfig.ExtraRefs[0].Repo)
 	}
 
-	ps.ProwJobDefault = c.mergeProwJobDefault(repo, ps.Cluster, ps.ProwJobDefault)
+	ps.ProwJobDefault = c.mergeProwJobDefault(repo, ps.Cluster, ps.ProwJobDefault, cache)
 }
 
-func setPresubmitDecorationDefaults(c *Config, ps *Presubmit, repo string) {
+func setPresubmitDecorationDefaults(c *Config, ps *Presubmit, repo string, cache *jobDefaultsCache) {
 	if shouldDecorate(&c.JobConfig, &ps.JobBase.UtilityConfig) {
-		ps.DecorationConfig = c.Plank.mergeDefaultDecorationConfig(repo, ps.Cluster, ps.DecorationConfig)
+		ps.DecorationConfig = c.Plank.mergeDefaultDecorationConfig(repo, ps.Cluster, ps.DecorationConfig, cache)
 	}
 }
 
-func setPostsubmitDecorationDefaults(c *Config, ps *Postsubmit, repo string) {
+func setPostsubmitDecorationDefaults(c *Config, ps *Postsubmit, repo string, cache *jobDefaultsCache) {
 	if shouldDecorate(&c.JobConfig, &ps.JobBase.UtilityConfig) {
-		ps.DecorationConfig = c.Plank.mergeDefaultDecorationConfig(repo, ps.Cluster, ps.DecorationConfig)
+		ps.DecorationConfig = c.Plank.mergeDefaultDecorationConfig(repo, ps.Cluster, ps.DecorationConfig, cache)
 	}
 }
 
-func setPeriodicDecorationDefaults(c *Config, ps *Periodic) {
+func setPeriodicDecorationDefaults(c *Config, ps *Periodic, cache *jobDefaultsCache) {
 	if shouldDecorate(&c.JobConfig, &ps.JobBase.UtilityConfig) {
 		var repo string
 		if len(ps.UtilityConfig.ExtraRefs) > 0 {
 			repo = fmt.Sprintf("%s/%s", ps.UtilityConfig.ExtraRefs[0].Org, ps.UtilityConfig.ExtraRefs[0].Repo)
 		}
 
-		ps.DecorationConfig = c.Plank.mergeDefaultDecorationConfig(repo, ps.Cluster, ps.DecorationConfig)
+		ps.DecorationConfig = c.Plank.mergeDefaultDecorationConfig(repo, ps.Cluster, ps.DecorationConfig, cache)
 	}
 }
 
 // defaultPresubmits defaults the presubmits for one repo.
-func defaultPresubmits(presubmits []Presubmit, additionalPresets []Preset, c *Config, repo string) error {
+func defaultPresubmits(presubmits []Presubmit, additionalPresets []Preset, c *Config, repo string, cache *jobDefaultsCache) error {
 	c.defaultPresubmitFields(presubmits)
 	var errs []error
 	for idx, ps := range presubmits {
-		setPresubmitDecorationDefaults(c, &presubmits[idx], repo)
-		setPresubmitProwJobDefaults(c, &presubmits[idx], repo)
+		setPresubmitDecorationDefaults(c, &presubmits[idx], repo, cache)
+		setPresubmitProwJobDefaults(c, &presubmits[idx], repo, cache)
 		if err := resolvePresets(ps.Name, ps.Labels, ps.Spec, append(c.Presets, additionalPresets...)); err != nil {
 			errs = append(errs, err)
 		}
@@ -2158,12 +2222,12 @@ func defaultPresubmits(presubmits []Presubmit, additionalPresets []Preset, c *Co
 }
 
 // defaultPostsubmits defaults the postsubmits for one repo.
-func defaultPostsubmits(postsubmits []Postsubmit, additionalPresets []Preset, c *Config, repo string) error {
+func defaultPostsubmits(postsubmits []Postsubmit, additionalPresets []Preset, c *Config, repo string, cache *jobDefaultsCache) error {
 	c.defaultPostsubmitFields(postsubmits)
 	var errs []error
 	for idx, ps := range postsubmits {
-		setPostsubmitDecorationDefaults(c, &postsubmits[idx], repo)
-		setPostsubmitProwJobDefaults(c, &postsubmits[idx], repo)
+		setPostsubmitDecorationDefaults(c, &postsubmits[idx], repo, cache)
+		setPostsubmitProwJobDefaults(c, &postsubmits[idx], repo, cache)
 		if err := resolvePresets(ps.Name, ps.Labels, ps.Spec, append(c.Presets, additionalPresets...)); err != nil {
 			errs = append(errs, err)
 		}
@@ -2176,17 +2240,21 @@ func defaultPostsubmits(postsubmits []Postsubmit, additionalPresets []Preset, c 
 
 // DefaultPeriodic defaults (mutates) a single Periodic.
 func (c *Config) DefaultPeriodic(periodic *Periodic) error {
+	return c.defaultPeriodic(periodic, nil)
+}
+
+func (c *Config) defaultPeriodic(periodic *Periodic, cache *jobDefaultsCache) error {
 	c.defaultPeriodicFields(periodic)
-	setPeriodicDecorationDefaults(c, periodic)
-	setPeriodicProwJobDefaults(c, periodic)
+	setPeriodicDecorationDefaults(c, periodic, cache)
+	setPeriodicProwJobDefaults(c, periodic, cache)
 	return resolvePresets(periodic.Name, periodic.Labels, periodic.Spec, c.Presets)
 }
 
 // defaultPeriodics defaults c.Periodics.
-func defaultPeriodics(c *Config) error {
+func defaultPeriodics(c *Config, cache *jobDefaultsCache) error {
 	var errs []error
 	for i := range c.Periodics {
-		errs = append(errs, c.DefaultPeriodic(&c.Periodics[i]))
+		errs = append(errs, c.defaultPeriodic(&c.Periodics[i], cache))
 	}
 	return utilerrors.NewAggregate(errs)
 }
@@ -2197,21 +2265,26 @@ func (c *Config) finalizeJobConfig() error {
 		return err
 	}
 
+	// The cache lives only for the duration of the defaulting, and is not
+	// reachable from the config afterwards: the jobs share the values it
+	// handed out, but nothing can write to it once the config is served.
+	cache := newJobDefaultsCache()
+
 	for repo, jobs := range c.PresubmitsStatic {
-		if err := defaultPresubmits(jobs, nil, c, repo); err != nil {
+		if err := defaultPresubmits(jobs, nil, c, repo, cache); err != nil {
 			return err
 		}
 		c.AllRepos.Insert(repo)
 	}
 
 	for repo, jobs := range c.PostsubmitsStatic {
-		if err := defaultPostsubmits(jobs, nil, c, repo); err != nil {
+		if err := defaultPostsubmits(jobs, nil, c, repo, cache); err != nil {
 			return err
 		}
 		c.AllRepos.Insert(repo)
 	}
 
-	if err := defaultPeriodics(c); err != nil {
+	if err := defaultPeriodics(c, cache); err != nil {
 		return err
 	}
 

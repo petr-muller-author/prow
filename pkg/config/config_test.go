@@ -5942,7 +5942,7 @@ func TestSetPeriodicProwJobDefaults(t *testing.T) {
 			c := &Config{}
 			periodic := &Periodic{JobBase: JobBase{Cluster: tc.cluster, UtilityConfig: tc.utilityConfig, ProwJobDefault: tc.givenDefault}}
 			c.defaultJobBase(&periodic.JobBase)
-			setPeriodicProwJobDefaults(tc.config, periodic)
+			setPeriodicProwJobDefaults(tc.config, periodic, nil)
 			if diff := cmp.Diff(periodic.ProwJobDefault, tc.expected, cmpopts.EquateEmpty()); diff != "" {
 				t.Error(diff)
 			}
@@ -6274,12 +6274,12 @@ func TestSetProwJobDefaults(t *testing.T) {
 			presubmit := &Presubmit{JobBase: *jb}
 			postsubmit := &Postsubmit{JobBase: *jb}
 
-			setPresubmitProwJobDefaults(tc.config, presubmit, tc.repo)
+			setPresubmitProwJobDefaults(tc.config, presubmit, tc.repo, nil)
 			if diff := cmp.Diff(presubmit.ProwJobDefault, tc.expected, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("presubmit: %s", diff)
 			}
 
-			setPostsubmitProwJobDefaults(tc.config, postsubmit, tc.repo)
+			setPostsubmitProwJobDefaults(tc.config, postsubmit, tc.repo, nil)
 			if diff := cmp.Diff(postsubmit.ProwJobDefault, tc.expected, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("postsubmit: %s", diff)
 			}
@@ -7075,12 +7075,12 @@ func TestSetDecorationDefaults(t *testing.T) {
 			presubmit := &Presubmit{JobBase: *jb}
 			postsubmit := &Postsubmit{JobBase: *jb}
 
-			setPresubmitDecorationDefaults(tc.config, presubmit, tc.repo)
+			setPresubmitDecorationDefaults(tc.config, presubmit, tc.repo, nil)
 			if diff := cmp.Diff(presubmit.DecorationConfig, tc.expected, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("presubmit: %s", diff)
 			}
 
-			setPostsubmitDecorationDefaults(tc.config, postsubmit, tc.repo)
+			setPostsubmitDecorationDefaults(tc.config, postsubmit, tc.repo, nil)
 			if diff := cmp.Diff(postsubmit.DecorationConfig, tc.expected, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("postsubmit: %s", diff)
 			}
@@ -7500,7 +7500,7 @@ func TestSetPeriodicDecorationDefaults(t *testing.T) {
 			c := &Config{}
 			periodic := &Periodic{JobBase: JobBase{Cluster: tc.cluster, UtilityConfig: tc.utilityConfig}}
 			c.defaultJobBase(&periodic.JobBase)
-			setPeriodicDecorationDefaults(tc.config, periodic)
+			setPeriodicDecorationDefaults(tc.config, periodic, nil)
 			if diff := cmp.Diff(periodic.DecorationConfig, tc.expected, cmpopts.EquateEmpty()); diff != "" {
 				t.Error(diff)
 			}
@@ -7902,11 +7902,11 @@ func TestMergeDefaultDecorationConfigThreadSafety(t *testing.T) {
 	s2 := make(chan struct{})
 
 	go func() {
-		_ = p.mergeDefaultDecorationConfig(repo, cluster, jobDC)
+		_ = p.mergeDefaultDecorationConfig(repo, cluster, jobDC, nil)
 		close(s1)
 	}()
 	go func() {
-		_ = p.mergeDefaultDecorationConfig(repo, cluster, jobDC)
+		_ = p.mergeDefaultDecorationConfig(repo, cluster, jobDC, nil)
 		close(s2)
 	}()
 

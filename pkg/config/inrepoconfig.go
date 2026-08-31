@@ -287,10 +287,10 @@ func prowYAMLGetterWithDefaults(
 }
 
 func DefaultAndValidateProwYAML(c *Config, p *ProwYAML, identifier string) error {
-	if err := defaultPresubmits(p.Presubmits, p.Presets, c, identifier); err != nil {
+	if err := defaultPresubmits(p.Presubmits, p.Presets, c, identifier, nil); err != nil {
 		return err
 	}
-	if err := defaultPostsubmits(p.Postsubmits, p.Presets, c, identifier); err != nil {
+	if err := defaultPostsubmits(p.Postsubmits, p.Presets, c, identifier, nil); err != nil {
 		return err
 	}
 	if err := c.validatePresubmits(append(p.Presubmits, c.GetPresubmitsStatic(identifier)...)); err != nil {
